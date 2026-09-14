@@ -5,12 +5,13 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -39,9 +40,6 @@ import com.suretyseven.docflow.service.ProcessingService;
 import com.suretyseven.docflow.service.S3Service;
 
 import lombok.extern.slf4j.Slf4j;
-import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
-import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 
 @Slf4j
 @Service
@@ -52,9 +50,7 @@ public class DocumentServiceImpl implements DocumentService {
     private final DocumentValidationErrorRepository documentValidationErrorRepository;
     private final DocumentHistoryRepository documentHistoryRepository;
     private final S3Service s3Service;
-    private final S3Client s3Client;
     private final ProcessingService processingService;
-    private final String bucketName;
     private final HttpClient httpClient = HttpClient.newHttpClient();
     private final SecureRandom secureRandom = new SecureRandom();
 
@@ -63,22 +59,34 @@ public class DocumentServiceImpl implements DocumentService {
                                 DocumentValidationErrorRepository documentValidationErrorRepository,
                                 DocumentHistoryRepository documentHistoryRepository,
                                 S3Service s3Service,
-                                S3Client s3Client,
-                                ProcessingService processingService,
-                                @Value("${aws.s3.bucket-name}") String bucketName) {
+                                ProcessingService processingService) {
         this.documentRepository = documentRepository;
         this.documentResultRepository = documentResultRepository;
         this.documentValidationErrorRepository = documentValidationErrorRepository;
         this.documentHistoryRepository = documentHistoryRepository;
         this.s3Service = s3Service;
-        this.s3Client = s3Client;
         this.processingService = processingService;
-        this.bucketName = bucketName;
     }
 
     @Override
     public DocumentUploadResponseDto uploadDocument(MultipartFile file, String documentType, String metadata) {
         byte[] fileBytes = readBytes(file);
+        String fileHash = computeFileHash(fileBytes);
+
+        Optional<Document> existingDocument = documentRepository.findByFileHash(fileHash);
+        if (existingDocument.isPresent()) {
+            Document existing = existingDocument.get();
+
+            if (AppConstants.STATUS_FAILED.equals(existing.getStatus())) {
+                log.info("Duplicate file hash for previously failed document: existingDocumentId={}. Creating fresh retry attempt.",
+                        existing.getId());
+                return retryFailedDocument(existing, documentType, metadata);
+            }
+
+            log.info("Duplicate document detected: documentId={}, status={}", existing.getId(), existing.getStatus());
+            throw new DuplicateDocumentException(ResponseMessages.DUPLICATE_DOCUMENT,
+                    existing.getId(), existing.getS3Key(), existing.getStatus());
+        }
 
         String documentId = generateUniqueDocumentId();
         String originalFilename = StringUtils.cleanPath(
@@ -89,17 +97,6 @@ public class DocumentServiceImpl implements DocumentService {
         String presignedPutUrl = s3Service.generatePresignedPutUrl(s3Key, contentType);
         uploadToPresignedUrl(presignedPutUrl, fileBytes, contentType);
 
-        String eTag = fetchETag(s3Key);
-
-        Optional<Document> existingDocument = documentRepository.findByFileHash(eTag);
-        if (existingDocument.isPresent()) {
-            Document existing = existingDocument.get();
-            log.info("Duplicate document detected: documentId={}", existing.getId());
-            s3Service.deleteObject(s3Key);
-            throw new DuplicateDocumentException(ResponseMessages.DUPLICATE_DOCUMENT,
-                    existing.getId(), existing.getS3Key(), existing.getStatus());
-        }
-
         LocalDateTime now = LocalDateTime.now();
         Document document = Document.builder()
                 .id(documentId)
@@ -108,7 +105,7 @@ public class DocumentServiceImpl implements DocumentService {
                 .documentType(documentType)
                 .status(AppConstants.STATUS_UPLOADED)
                 .metadata(metadata)
-                .fileHash(eTag)
+                .fileHash(fileHash)
                 .retryCount(0)
                 .createdAt(now)
                 .updatedAt(now)
@@ -125,6 +122,56 @@ public class DocumentServiceImpl implements DocumentService {
                 .s3Key(s3Key)
                 .status(AppConstants.STATUS_UPLOADED)
                 .build();
+    }
+
+    /**
+     * Re-attempts a previously failed document without touching S3: the file is already
+     * stored under the old document's s3Key, so a brand new document record simply points
+     * at it. The old (failed) record is left untouched so its history stays intact.
+     */
+    private DocumentUploadResponseDto retryFailedDocument(Document failedDocument, String documentType, String metadata) {
+        String newDocumentId = generateUniqueDocumentId();
+        LocalDateTime now = LocalDateTime.now();
+
+        Document document = Document.builder()
+                .id(newDocumentId)
+                .filename(failedDocument.getFilename())
+                .s3Key(failedDocument.getS3Key())
+                .documentType(documentType)
+                .status(AppConstants.STATUS_UPLOADED)
+                .metadata(metadata)
+                .fileHash(failedDocument.getFileHash())
+                .retryCount(0)
+                .createdAt(now)
+                .updatedAt(now)
+                .build();
+        documentRepository.save(document);
+
+        saveHistory(document, AppConstants.STATUS_UPLOADED, null, null);
+        log.info("Document re-upload accepted: newDocumentId={}, previousFailedDocumentId={}, filename={}, documentType={}",
+                newDocumentId, failedDocument.getId(), document.getFilename(), documentType);
+
+        processingService.processDocument(newDocumentId);
+
+        return DocumentUploadResponseDto.builder()
+                .documentId(newDocumentId)
+                .s3Key(document.getS3Key())
+                .status(AppConstants.STATUS_UPLOADED)
+                .build();
+    }
+
+    private String computeFileHash(byte[] fileBytes) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hashBytes = digest.digest(fileBytes);
+            StringBuilder hex = new StringBuilder(hashBytes.length * 2);
+            for (byte b : hashBytes) {
+                hex.append(String.format("%02x", b));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException("SHA-256 algorithm not available", ex);
+        }
     }
 
     private byte[] readBytes(MultipartFile file) {
@@ -152,16 +199,6 @@ public class DocumentServiceImpl implements DocumentService {
             }
             throw new IllegalStateException(ResponseMessages.UPLOAD_FAILED, ex);
         }
-    }
-
-    private String fetchETag(String s3Key) {
-        HeadObjectRequest headObjectRequest = HeadObjectRequest.builder()
-                .bucket(bucketName)
-                .key(s3Key)
-                .build();
-        HeadObjectResponse headObjectResponse = s3Client.headObject(headObjectRequest);
-        String eTag = headObjectResponse.eTag();
-        return eTag != null ? eTag.replace("\"", "") : null;
     }
 
     private String generateUniqueDocumentId() {

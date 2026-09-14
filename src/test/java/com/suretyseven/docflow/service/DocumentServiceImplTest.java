@@ -4,12 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.security.MessageDigest;
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.Optional;
@@ -22,6 +22,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.mock.web.MockMultipartFile;
 
 import com.suretyseven.docflow.constants.AppConstants;
+import com.suretyseven.docflow.constants.ResponseMessages;
 import com.suretyseven.docflow.dto.response.DocumentDetailDto;
 import com.suretyseven.docflow.dto.response.DocumentUploadResponseDto;
 import com.suretyseven.docflow.entity.Document;
@@ -33,12 +34,10 @@ import com.suretyseven.docflow.repository.DocumentResultRepository;
 import com.suretyseven.docflow.repository.DocumentValidationErrorRepository;
 import com.suretyseven.docflow.service.impl.DocumentServiceImpl;
 
-import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
-import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
-
 @ExtendWith(MockitoExtension.class)
 class DocumentServiceImplTest {
+
+    private static final byte[] SAMPLE_BYTES = "hello-world".getBytes();
 
     @Mock
     private DocumentRepository documentRepository;
@@ -56,9 +55,6 @@ class DocumentServiceImplTest {
     private S3Service s3Service;
 
     @Mock
-    private S3Client s3Client;
-
-    @Mock
     private ProcessingService processingService;
 
     /**
@@ -68,7 +64,7 @@ class DocumentServiceImplTest {
     private class TestableDocumentService extends DocumentServiceImpl {
         TestableDocumentService() {
             super(documentRepository, documentResultRepository, documentValidationErrorRepository,
-                    documentHistoryRepository, s3Service, s3Client, processingService, "test-bucket");
+                    documentHistoryRepository, s3Service, processingService);
         }
 
         @Override
@@ -85,16 +81,28 @@ class DocumentServiceImplTest {
     }
 
     private MockMultipartFile sampleFile() {
-        return new MockMultipartFile("file", "invoice.pdf", "application/pdf", "hello-world".getBytes());
+        return new MockMultipartFile("file", "invoice.pdf", "application/pdf", SAMPLE_BYTES);
+    }
+
+    private String sampleFileHash() {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hashBytes = digest.digest(SAMPLE_BYTES);
+            StringBuilder hex = new StringBuilder(hashBytes.length * 2);
+            for (byte b : hashBytes) {
+                hex.append(String.format("%02x", b));
+            }
+            return hex.toString();
+        } catch (Exception ex) {
+            throw new IllegalStateException(ex);
+        }
     }
 
     @Test
     void uploadDocument_validFile_returnsUploadedStatus() {
+        when(documentRepository.findByFileHash(sampleFileHash())).thenReturn(Optional.empty());
         when(documentRepository.existsById(anyString())).thenReturn(false);
         when(s3Service.generatePresignedPutUrl(anyString(), anyString())).thenReturn("https://s3.example.com/put");
-        when(s3Client.headObject(any(HeadObjectRequest.class)))
-                .thenReturn(HeadObjectResponse.builder().eTag("\"abc123\"").build());
-        when(documentRepository.findByFileHash("abc123")).thenReturn(Optional.empty());
 
         DocumentUploadResponseDto response = documentService.uploadDocument(sampleFile(), "FINANCIAL_STATEMENT", null);
 
@@ -108,36 +116,91 @@ class DocumentServiceImplTest {
     }
 
     @Test
-    void uploadDocument_duplicateFileHash_throwsDuplicateDocumentExceptionWithExistingDocumentId() {
+    void uploadDocument_duplicateOfProcessedDocument_throwsDuplicateDocumentExceptionAndSkipsS3() {
         Document existing = Document.builder()
                 .id("DOC-11111")
                 .filename("invoice.pdf")
                 .s3Key("documents/DOC-11111/invoice.pdf")
                 .documentType("FINANCIAL_STATEMENT")
-                .status(AppConstants.STATUS_UPLOADED)
-                .fileHash("abc123")
+                .status(AppConstants.STATUS_PROCESSED)
+                .fileHash(sampleFileHash())
                 .retryCount(0)
                 .createdAt(LocalDateTime.now())
                 .updatedAt(LocalDateTime.now())
                 .build();
 
-        when(documentRepository.existsById(anyString())).thenReturn(false);
-        when(s3Service.generatePresignedPutUrl(anyString(), anyString())).thenReturn("https://s3.example.com/put");
-        when(s3Client.headObject(any(HeadObjectRequest.class)))
-                .thenReturn(HeadObjectResponse.builder().eTag("\"abc123\"").build());
-        when(documentRepository.findByFileHash("abc123")).thenReturn(Optional.of(existing));
-        doNothing().when(s3Service).deleteObject(anyString());
+        when(documentRepository.findByFileHash(sampleFileHash())).thenReturn(Optional.of(existing));
 
         assertThatThrownBy(() -> documentService.uploadDocument(sampleFile(), "FINANCIAL_STATEMENT", null))
                 .isInstanceOf(DuplicateDocumentException.class)
                 .satisfies(ex -> {
                     DuplicateDocumentException duplicate = (DuplicateDocumentException) ex;
                     assertThat(duplicate.getExistingDocumentId()).isEqualTo("DOC-11111");
-                    assertThat(duplicate.getMessage()).isEqualTo(com.suretyseven.docflow.constants.ResponseMessages.DUPLICATE_DOCUMENT);
+                    assertThat(duplicate.getMessage()).isEqualTo(ResponseMessages.DUPLICATE_DOCUMENT);
                 });
 
+        verify(s3Service, never()).generatePresignedPutUrl(anyString(), anyString());
+        verify(s3Service, never()).deleteObject(anyString());
         verify(documentRepository, never()).save(any(Document.class));
         verify(processingService, never()).processDocument(anyString());
+    }
+
+    @Test
+    void uploadDocument_duplicateOfUploadedOrProcessingDocument_throwsDuplicateDocumentException() {
+        Document existing = Document.builder()
+                .id("DOC-55555")
+                .filename("invoice.pdf")
+                .s3Key("documents/DOC-55555/invoice.pdf")
+                .documentType("FINANCIAL_STATEMENT")
+                .status(AppConstants.STATUS_PROCESSING)
+                .fileHash(sampleFileHash())
+                .retryCount(0)
+                .createdAt(LocalDateTime.now())
+                .updatedAt(LocalDateTime.now())
+                .build();
+
+        when(documentRepository.findByFileHash(sampleFileHash())).thenReturn(Optional.of(existing));
+
+        assertThatThrownBy(() -> documentService.uploadDocument(sampleFile(), "FINANCIAL_STATEMENT", null))
+                .isInstanceOf(DuplicateDocumentException.class);
+
+        verify(s3Service, never()).generatePresignedPutUrl(anyString(), anyString());
+        verify(documentRepository, never()).save(any(Document.class));
+        verify(processingService, never()).processDocument(anyString());
+    }
+
+    @Test
+    void uploadDocument_duplicateOfFailedDocument_createsNewDocumentReusingS3KeyWithoutReupload() {
+        Document existing = Document.builder()
+                .id("DOC-44444")
+                .filename("invoice.pdf")
+                .s3Key("documents/DOC-44444/invoice.pdf")
+                .documentType("FINANCIAL_STATEMENT")
+                .status(AppConstants.STATUS_FAILED)
+                .fileHash(sampleFileHash())
+                .retryCount(3)
+                .createdAt(LocalDateTime.now())
+                .updatedAt(LocalDateTime.now())
+                .build();
+
+        when(documentRepository.findByFileHash(sampleFileHash())).thenReturn(Optional.of(existing));
+        when(documentRepository.existsById(anyString())).thenReturn(false);
+
+        DocumentUploadResponseDto response = documentService.uploadDocument(sampleFile(), "FINANCIAL_STATEMENT", null);
+
+        assertThat(response.getStatus()).isEqualTo(AppConstants.STATUS_UPLOADED);
+        assertThat(response.getDocumentId()).isNotEqualTo("DOC-44444");
+        assertThat(response.getS3Key()).isEqualTo(existing.getS3Key());
+
+        // No new upload: the presigned PUT flow must never be invoked for a failed-document retry.
+        verify(s3Service, never()).generatePresignedPutUrl(anyString(), anyString());
+        verify(s3Service, never()).deleteObject(anyString());
+
+        // The old failed record itself is never touched/updated.
+        verify(documentRepository, never()).save(existing);
+
+        verify(documentRepository, times(1)).save(any(Document.class));
+        verify(processingService, times(1)).processDocument(response.getDocumentId());
     }
 
     @Test
