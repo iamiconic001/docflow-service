@@ -9,6 +9,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 
@@ -73,19 +74,27 @@ public class DocumentServiceImpl implements DocumentService {
         byte[] fileBytes = readBytes(file);
         String fileHash = computeFileHash(fileBytes);
 
-        Optional<Document> existingDocument = documentRepository.findByFileHash(fileHash);
-        if (existingDocument.isPresent()) {
-            Document existing = existingDocument.get();
+        List<Document> existingDocuments = documentRepository.findByFileHash(fileHash);
+        if (!existingDocuments.isEmpty()) {
+            // Multiple documents can share the same fileHash after repeated failed retries;
+            // an active/completed one always takes priority for blocking over a failed one.
+            Optional<Document> blockingDocument = existingDocuments.stream()
+                    .filter(doc -> !AppConstants.STATUS_FAILED.equals(doc.getStatus()))
+                    .findFirst();
 
-            if (AppConstants.STATUS_FAILED.equals(existing.getStatus())) {
-                log.info("Duplicate file hash for previously failed document: existingDocumentId={}. Creating fresh retry attempt.",
-                        existing.getId());
-                return retryFailedDocument(existing, documentType, metadata);
+            if (blockingDocument.isPresent()) {
+                Document existing = blockingDocument.get();
+                log.info("Duplicate document detected: documentId={}, status={}", existing.getId(), existing.getStatus());
+                throw new DuplicateDocumentException(ResponseMessages.DUPLICATE_DOCUMENT,
+                        existing.getId(), existing.getS3Key(), existing.getStatus());
             }
 
-            log.info("Duplicate document detected: documentId={}, status={}", existing.getId(), existing.getStatus());
-            throw new DuplicateDocumentException(ResponseMessages.DUPLICATE_DOCUMENT,
-                    existing.getId(), existing.getS3Key(), existing.getStatus());
+            Document mostRecentFailed = existingDocuments.stream()
+                    .max(Comparator.comparing(Document::getCreatedAt))
+                    .orElseThrow();
+            log.info("Duplicate file hash for previously failed document: existingDocumentId={}. Creating fresh retry attempt.",
+                    mostRecentFailed.getId());
+            return retryFailedDocument(mostRecentFailed, documentType, metadata);
         }
 
         String documentId = generateUniqueDocumentId();

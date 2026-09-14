@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 import java.security.MessageDigest;
 import java.time.LocalDateTime;
 import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -100,7 +101,7 @@ class DocumentServiceImplTest {
 
     @Test
     void uploadDocument_validFile_returnsUploadedStatus() {
-        when(documentRepository.findByFileHash(sampleFileHash())).thenReturn(Optional.empty());
+        when(documentRepository.findByFileHash(sampleFileHash())).thenReturn(Collections.emptyList());
         when(documentRepository.existsById(anyString())).thenReturn(false);
         when(s3Service.generatePresignedPutUrl(anyString(), anyString())).thenReturn("https://s3.example.com/put");
 
@@ -129,7 +130,7 @@ class DocumentServiceImplTest {
                 .updatedAt(LocalDateTime.now())
                 .build();
 
-        when(documentRepository.findByFileHash(sampleFileHash())).thenReturn(Optional.of(existing));
+        when(documentRepository.findByFileHash(sampleFileHash())).thenReturn(List.of(existing));
 
         assertThatThrownBy(() -> documentService.uploadDocument(sampleFile(), "FINANCIAL_STATEMENT", null))
                 .isInstanceOf(DuplicateDocumentException.class)
@@ -159,7 +160,7 @@ class DocumentServiceImplTest {
                 .updatedAt(LocalDateTime.now())
                 .build();
 
-        when(documentRepository.findByFileHash(sampleFileHash())).thenReturn(Optional.of(existing));
+        when(documentRepository.findByFileHash(sampleFileHash())).thenReturn(List.of(existing));
 
         assertThatThrownBy(() -> documentService.uploadDocument(sampleFile(), "FINANCIAL_STATEMENT", null))
                 .isInstanceOf(DuplicateDocumentException.class);
@@ -183,7 +184,7 @@ class DocumentServiceImplTest {
                 .updatedAt(LocalDateTime.now())
                 .build();
 
-        when(documentRepository.findByFileHash(sampleFileHash())).thenReturn(Optional.of(existing));
+        when(documentRepository.findByFileHash(sampleFileHash())).thenReturn(List.of(existing));
         when(documentRepository.existsById(anyString())).thenReturn(false);
 
         DocumentUploadResponseDto response = documentService.uploadDocument(sampleFile(), "FINANCIAL_STATEMENT", null);
@@ -200,6 +201,43 @@ class DocumentServiceImplTest {
         verify(documentRepository, never()).save(existing);
 
         verify(documentRepository, times(1)).save(any(Document.class));
+        verify(processingService, times(1)).processDocument(response.getDocumentId());
+    }
+
+    @Test
+    void uploadDocument_multipleFailedDocumentsShareSameHash_retriesFromMostRecentWithoutError() {
+        // Reproduces: same PDF uploaded twice before, both attempts ended FAILED, so two rows
+        // share the same fileHash. A third upload must not blow up on a non-unique lookup.
+        Document olderFailed = Document.builder()
+                .id("DOC-34659")
+                .filename("file-example_PDF_500_kB.pdf")
+                .s3Key("documents/DOC-34659/file-example_PDF_500_kB.pdf")
+                .documentType("TEST_FAIL")
+                .status(AppConstants.STATUS_FAILED)
+                .fileHash(sampleFileHash())
+                .retryCount(3)
+                .createdAt(LocalDateTime.now().minusMinutes(30))
+                .updatedAt(LocalDateTime.now().minusMinutes(30))
+                .build();
+        Document newerFailed = Document.builder()
+                .id("DOC-66053")
+                .filename("file-example_PDF_500_kB.pdf")
+                .s3Key("documents/DOC-66053/file-example_PDF_500_kB.pdf")
+                .documentType("TEST_INVALID")
+                .status(AppConstants.STATUS_FAILED)
+                .fileHash(sampleFileHash())
+                .retryCount(0)
+                .createdAt(LocalDateTime.now())
+                .updatedAt(LocalDateTime.now())
+                .build();
+
+        when(documentRepository.findByFileHash(sampleFileHash())).thenReturn(List.of(olderFailed, newerFailed));
+        when(documentRepository.existsById(anyString())).thenReturn(false);
+
+        DocumentUploadResponseDto response = documentService.uploadDocument(sampleFile(), "TEST_SUCCESS", null);
+
+        assertThat(response.getStatus()).isEqualTo(AppConstants.STATUS_UPLOADED);
+        assertThat(response.getS3Key()).isEqualTo(newerFailed.getS3Key());
         verify(processingService, times(1)).processDocument(response.getDocumentId());
     }
 
