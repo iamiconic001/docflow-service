@@ -17,6 +17,9 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 import com.suretyseven.docflow.filter.JwtAuthFilter;
 
+import lombok.extern.slf4j.Slf4j;
+
+@Slf4j
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
@@ -47,6 +50,7 @@ public class SecurityConfig {
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        log.info("Configuring security filter chain: /auth/** public, /documents/** authenticated, stateless JWT");
         http.cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))

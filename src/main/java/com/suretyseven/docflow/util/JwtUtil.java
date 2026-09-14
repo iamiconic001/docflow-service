@@ -11,7 +11,9 @@ import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.security.Keys;
+import lombok.extern.slf4j.Slf4j;
 
+@Slf4j
 @Component
 public class JwtUtil {
 
@@ -27,19 +29,27 @@ public class JwtUtil {
     public String generateToken(String username) {
         Date now = new Date();
         Date expiry = new Date(now.getTime() + expiryMs);
-        return Jwts.builder()
+        String token = Jwts.builder()
                 .setSubject(username)
                 .setIssuedAt(now)
                 .setExpiration(expiry)
                 .signWith(signingKey, SignatureAlgorithm.HS256)
                 .compact();
+        // Only the subject/expiry are logged; the signed token itself is a credential.
+        log.debug("Issued JWT: username={}, expiresAt={}", username, expiry);
+        return token;
     }
 
     public boolean validateToken(String token) {
         try {
             Claims claims = parseClaims(token);
-            return claims.getExpiration().after(new Date());
+            boolean valid = claims.getExpiration().after(new Date());
+            if (!valid) {
+                log.debug("JWT rejected: expired at {}", claims.getExpiration());
+            }
+            return valid;
         } catch (JwtException | IllegalArgumentException ex) {
+            log.debug("JWT rejected: {}", ex.getMessage());
             return false;
         }
     }

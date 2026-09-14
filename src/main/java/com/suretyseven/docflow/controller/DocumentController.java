@@ -24,6 +24,9 @@ import com.suretyseven.docflow.service.DocumentService;
 
 import java.util.List;
 
+import lombok.extern.slf4j.Slf4j;
+
+@Slf4j
 @RestController
 @RequestMapping("/documents")
 public class DocumentController {
@@ -39,24 +42,30 @@ public class DocumentController {
             @RequestPart("file") MultipartFile file,
             @RequestPart("documentType") String documentType,
             @RequestPart(value = "metadata", required = false) String metadata) {
+        // File contents/metadata values are never logged; only the filename and declared type.
+        log.info("Upload request received: filename={}, documentType={}", file.getOriginalFilename(), documentType);
         DocumentUploadResponseDto response = documentService.uploadDocument(file, documentType, metadata);
         return ResponseEntity.ok(ApiResponse.success(ResponseMessages.DOCUMENT_UPLOADED, response));
     }
 
     @GetMapping("/{documentId}")
     public ResponseEntity<ApiResponse<DocumentDetailDto>> getDocument(@PathVariable String documentId) {
+        log.info("Get document request received: documentId={}", documentId);
         DocumentDetailDto response = documentService.getDocument(documentId);
         return ResponseEntity.ok(ApiResponse.success(ResponseMessages.DOCUMENT_FETCHED, response));
     }
 
     @GetMapping("/{documentId}/history")
     public ResponseEntity<ApiResponse<List<DocumentHistoryDto>>> getDocumentHistory(@PathVariable String documentId) {
+        log.info("Get document history request received: documentId={}", documentId);
         List<DocumentHistoryDto> response = documentService.getDocumentHistory(documentId);
         return ResponseEntity.ok(ApiResponse.success(ResponseMessages.HISTORY_FETCHED, response));
     }
 
     @GetMapping("/{documentId}/download")
     public ResponseEntity<ApiResponse<PresignedUrlResponseDto>> downloadDocument(@PathVariable String documentId) {
+        // The generated presigned URL itself is not logged since it is a bearer credential.
+        log.info("Download URL request received: documentId={}", documentId);
         PresignedUrlResponseDto response = documentService.getDownloadUrl(documentId);
         return ResponseEntity.ok(ApiResponse.success(ResponseMessages.DOWNLOAD_URL_GENERATED, response));
     }
@@ -67,6 +76,8 @@ public class DocumentController {
             @RequestParam(required = false) String documentType,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size) {
+        log.info("List documents request received: status={}, documentType={}, page={}, size={}",
+                status, documentType, page, size);
         Pageable pageable = PageRequest.of(page, size);
         Page<DocumentListDto> response = documentService.listDocuments(status, documentType, pageable);
         return ResponseEntity.ok(ApiResponse.success(ResponseMessages.DOCUMENT_LIST_FETCHED, response));

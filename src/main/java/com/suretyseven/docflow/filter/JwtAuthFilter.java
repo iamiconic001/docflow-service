@@ -17,7 +17,9 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import lombok.extern.slf4j.Slf4j;
 
+@Slf4j
 @Component
 public class JwtAuthFilter extends OncePerRequestFilter {
 
@@ -33,6 +35,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                                      @NonNull FilterChain filterChain) throws ServletException, IOException {
         String header = request.getHeader(AppConstants.JWT_HEADER);
 
+        // The token itself is a bearer credential and must never be logged, in full or in part.
         if (header != null && header.startsWith(AppConstants.JWT_PREFIX)) {
             String token = header.substring(AppConstants.JWT_PREFIX.length());
             if (jwtUtil.validateToken(token)) {
@@ -40,7 +43,12 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
                         username, null, List.of(new SimpleGrantedAuthority("ROLE_USER")));
                 SecurityContextHolder.getContext().setAuthentication(authentication);
+                log.debug("Authenticated request via JWT: username={}, path={}", username, request.getRequestURI());
+            } else {
+                log.warn("Rejected request with invalid or expired JWT: path={}", request.getRequestURI());
             }
+        } else {
+            log.debug("Request has no Bearer token: path={}", request.getRequestURI());
         }
 
         filterChain.doFilter(request, response);
