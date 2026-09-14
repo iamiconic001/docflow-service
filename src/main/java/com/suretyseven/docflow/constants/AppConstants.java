@@ -25,6 +25,10 @@ public final class AppConstants {
     public static final String PROCESSOR_RESULT_ERROR = "ERROR";
     public static final String PROCESSOR_RESULT_INVALID = "INVALID_RESULT";
 
+    public static final String DOCUMENT_TYPE_TEST_FAIL = "TEST_FAIL";
+    public static final String DOCUMENT_TYPE_TEST_INVALID = "TEST_INVALID";
+    public static final String DOCUMENT_TYPE_TEST_SUCCESS = "TEST_SUCCESS";
+
     public static final String MOCK_COMPANY_NAME = "ABC Construction Pvt Ltd";
     public static final String MOCK_REGISTRATION_NUMBER = "U12345DL2020PTC123456";
     public static final String MOCK_ADDRESS = "New Delhi";

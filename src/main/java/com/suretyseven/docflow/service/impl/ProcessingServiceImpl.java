@@ -62,7 +62,7 @@ public class ProcessingServiceImpl implements ProcessingService {
         saveHistory(document, AppConstants.STATUS_PROCESSING, null, attemptNumber);
         log.info("Processing started: documentId={}, attemptNumber={}", documentId, attemptNumber);
 
-        String mockResult = mockProcessor();
+        String mockResult = mockProcessor(document.getDocumentType());
         log.info("Mock processor result: documentId={}, attemptNumber={}, result={}", documentId, attemptNumber, mockResult);
 
         switch (mockResult) {
@@ -74,7 +74,17 @@ public class ProcessingServiceImpl implements ProcessingService {
         }
     }
 
-    protected String mockProcessor() {
+    protected String mockProcessor(String documentType) {
+        if (AppConstants.DOCUMENT_TYPE_TEST_FAIL.equals(documentType)) {
+            return AppConstants.PROCESSOR_RESULT_TIMEOUT;
+        }
+        if (AppConstants.DOCUMENT_TYPE_TEST_INVALID.equals(documentType)) {
+            return AppConstants.PROCESSOR_RESULT_INVALID;
+        }
+        if (AppConstants.DOCUMENT_TYPE_TEST_SUCCESS.equals(documentType)) {
+            return AppConstants.PROCESSOR_RESULT_SUCCESS;
+        }
+
         int roll = ThreadLocalRandom.current().nextInt(100);
         if (roll < 60) {
             return AppConstants.PROCESSOR_RESULT_SUCCESS;

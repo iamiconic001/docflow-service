@@ -59,7 +59,7 @@ class ProcessingServiceImplTest {
         }
 
         @Override
-        protected String mockProcessor() {
+        protected String mockProcessor(String documentType) {
             return scriptedResults.isEmpty() ? AppConstants.PROCESSOR_RESULT_SUCCESS : scriptedResults.removeFirst();
         }
 
@@ -175,5 +175,62 @@ class ProcessingServiceImplTest {
         assertThat(document.getStatus()).isEqualTo(AppConstants.STATUS_FAILED);
         assertThat(document.getRetryCount()).isEqualTo(0);
         verify(documentResultRepository, times(0)).save(any());
+    }
+
+    /**
+     * Sleep is stubbed out but the real (non-scripted) mockProcessor is exercised here to
+     * verify the documentType-based overrides against the live implementation.
+     */
+    private class RealMockProcessorService extends ProcessingServiceImpl {
+        RealMockProcessorService() {
+            super(documentRepository, documentHistoryRepository, documentResultRepository, documentValidationErrorRepository);
+        }
+
+        @Override
+        protected void sleepForBackoff(int retryCount) {
+            // no-op: skip real sleeping in tests
+        }
+    }
+
+    @Test
+    void processDocument_documentTypeTestFail_alwaysTimesOutAndRetries() {
+        document.setDocumentType(AppConstants.DOCUMENT_TYPE_TEST_FAIL);
+        RealMockProcessorService service = new RealMockProcessorService();
+
+        service.processDocument("DOC-33333");
+
+        assertThat(document.getStatus()).isEqualTo(AppConstants.STATUS_FAILED);
+        assertThat(document.getRetryCount()).isEqualTo(AppConstants.MAX_RETRIES);
+
+        ArgumentCaptor<DocumentHistory> historyCaptor = ArgumentCaptor.forClass(DocumentHistory.class);
+        verify(documentHistoryRepository, atLeast(1)).save(historyCaptor.capture());
+        boolean allTimeoutOrMaxRetries = historyCaptor.getAllValues().stream()
+                .filter(h -> h.getReason() != null)
+                .allMatch(h -> AppConstants.REASON_TIMEOUT.equals(h.getReason()) || AppConstants.REASON_MAX_RETRIES.equals(h.getReason()));
+        assertThat(allTimeoutOrMaxRetries).isTrue();
+    }
+
+    @Test
+    void processDocument_documentTypeTestInvalid_alwaysFailsWithoutRetry() {
+        document.setDocumentType(AppConstants.DOCUMENT_TYPE_TEST_INVALID);
+        RealMockProcessorService service = new RealMockProcessorService();
+
+        service.processDocument("DOC-33333");
+
+        assertThat(document.getStatus()).isEqualTo(AppConstants.STATUS_FAILED);
+        assertThat(document.getRetryCount()).isEqualTo(0);
+        verify(documentResultRepository, times(0)).save(any());
+    }
+
+    @Test
+    void processDocument_documentTypeTestSuccess_alwaysProcessed() {
+        document.setDocumentType(AppConstants.DOCUMENT_TYPE_TEST_SUCCESS);
+        RealMockProcessorService service = new RealMockProcessorService();
+
+        service.processDocument("DOC-33333");
+
+        assertThat(document.getStatus()).isEqualTo(AppConstants.STATUS_PROCESSED);
+        assertThat(document.getRetryCount()).isEqualTo(0);
+        verify(documentResultRepository, times(1)).save(any());
     }
 }
