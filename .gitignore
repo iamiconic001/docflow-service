@@ -1,0 +1,6 @@
+target/
+*.jar
+*.class
+.env
+application-prod.properties
+*.pem
